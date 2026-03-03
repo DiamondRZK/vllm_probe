@@ -50,7 +50,7 @@ This forces NCCL through TCP sockets where `tc netem` can intercept packets. The
 ## Quick Start
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/vllm_probe.git
+git clone https://github.com/DiamondRZK/vllm_probe.git
 cd vllm_probe
 docker compose build
 
