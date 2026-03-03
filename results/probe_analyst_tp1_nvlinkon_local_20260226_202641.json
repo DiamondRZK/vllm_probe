@@ -1,0 +1,59 @@
+{
+  "vllm_probe_version": "1.0.0",
+  "configuration": {
+    "model": "Qwen/Qwen2.5-3B",
+    "scenario": {
+      "name": "analyst",
+      "description": "RAG / Document Analysis — Prefill Stress Test",
+      "bottleneck": "Compute (TFLOPS)",
+      "justification": "With 8192 input tokens and only 128 output tokens, >98% of compute is spent in the prefill phase. This isolates GPU TFLOPS as the sole bottleneck. If this scenario is slow, adding more network bandwidth or NVLink won't help — you need faster GPUs.",
+      "sensitivity": {
+        "network": "LOW — Prefill is parallelizable; one large matmul amortizes sync cost",
+        "nvlink": "MODERATE — KV-cache distribution benefits from high bandwidth",
+        "vram": "HIGH — 8K context requires significant KV-cache allocation"
+      }
+    },
+    "physics": {
+      "nvlink_flag": "enable",
+      "nvlink_hardware_present": false,
+      "actual_interconnect": "PCIe",
+      "network_profile": "local",
+      "network_description": "Local machine — no artificial latency",
+      "network_real_world": "Same rack / NVLink domain",
+      "injected_delay_ms": 0
+    },
+    "tensor_parallel_size": 1,
+    "warmup_rounds": 2,
+    "benchmark_rounds": 3
+  },
+  "results": {
+    "timing": {
+      "ttft": {
+        "mean_s": 0.2674,
+        "p50_s": 0.2675,
+        "p99_s": 0.2678,
+        "unit": "seconds",
+        "description": "Time To First Token — measures prefill + scheduling latency"
+      },
+      "tpot": {
+        "mean_s": 0.018949,
+        "p50_s": 0.018956,
+        "p99_s": 0.018977,
+        "unit": "seconds",
+        "description": "Time Per Output Token — steady-state decode speed"
+      },
+      "throughput": {
+        "tokens_per_second": 47.87,
+        "description": "Aggregate output tokens per second"
+      },
+      "total_wall_clock_s": 2.674
+    },
+    "analysis": {
+      "estimated_network_overhead_s": 0.0,
+      "network_overhead_pct": 0.0,
+      "decode_bottleneck": "COMPUTE/MEMORY-BOUND. GPU hardware is the primary bottleneck (healthy state)."
+    },
+    "errors": []
+  },
+  "timestamp": "2026-02-26T20:25:44.956965+00:00"
+}

@@ -1,0 +1,59 @@
+{
+  "vllm_probe_version": "1.0.0",
+  "configuration": {
+    "model": "Qwen/Qwen2.5-3B",
+    "scenario": {
+      "name": "creative",
+      "description": "Long-form Generation — Decode Stress Test",
+      "bottleneck": "Memory Bandwidth + Interconnect Latency",
+      "justification": "This is the 'canary in the coal mine' for distributed inference. With 2048 autoregressive decode steps, the total latency added by network round-trips is: 2048 × RTT. For cross-continent (200ms RTT), that's 2048 × 0.2s = 409.6 seconds of PURE NETWORK WAITING. This mathematically proves why Tensor Parallelism across continents is architecturally impossible for real-time inference.",
+      "sensitivity": {
+        "network": "CRITICAL — Each of 2048 tokens requires GPU sync (AllReduce)",
+        "nvlink": "CRITICAL — PCIe adds ~50μs/token × 2048 = ~100ms total overhead",
+        "vram": "LOW — Small input means minimal KV-cache"
+      }
+    },
+    "physics": {
+      "nvlink_flag": "enable",
+      "nvlink_hardware_present": false,
+      "actual_interconnect": "PCIe",
+      "network_profile": "local",
+      "network_description": "Local machine — no artificial latency",
+      "network_real_world": "Same rack / NVLink domain",
+      "injected_delay_ms": 0
+    },
+    "tensor_parallel_size": 2,
+    "warmup_rounds": 2,
+    "benchmark_rounds": 3
+  },
+  "results": {
+    "timing": {
+      "ttft": {
+        "mean_s": 2.6751,
+        "p50_s": 2.6712,
+        "p99_s": 2.6922,
+        "unit": "seconds",
+        "description": "Time To First Token — measures prefill + scheduling latency"
+      },
+      "tpot": {
+        "mean_s": 0.011762,
+        "p50_s": 0.011744,
+        "p99_s": 0.011837,
+        "unit": "seconds",
+        "description": "Time Per Output Token — steady-state decode speed"
+      },
+      "throughput": {
+        "tokens_per_second": 76.56,
+        "description": "Aggregate output tokens per second"
+      },
+      "total_wall_clock_s": 26.7511
+    },
+    "analysis": {
+      "estimated_network_overhead_s": 0.0,
+      "network_overhead_pct": 0.0,
+      "decode_bottleneck": "COMPUTE/MEMORY-BOUND. GPU hardware is the primary bottleneck (healthy state)."
+    },
+    "errors": []
+  },
+  "timestamp": "2026-02-26T20:27:15.856874+00:00"
+}

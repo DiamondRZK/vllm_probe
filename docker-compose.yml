@@ -1,0 +1,147 @@
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║  vllm_probe — Docker Compose Deployment Profiles                            ║
+# ║                                                                             ║
+# ║  THREE DEPLOYMENT MODES:                                                    ║
+# ║                                                                             ║
+# ║  1. SINGLE NODE (default)                                                   ║
+# ║     One container, 2 GPUs, simulates everything locally.                    ║
+# ║     Use: docker compose up probe-local                                      ║
+# ║                                                                             ║
+# ║  2. MULTI-NODE SIMULATION                                                   ║
+# ║     Two containers on the same host, each with 1 GPU, connected via         ║
+# ║     Docker network. Simulates a 2-node cluster with real network overhead.  ║
+# ║     Use: docker compose --profile cluster up                                ║
+# ║                                                                             ║
+# ║  3. REAL DISTRIBUTED (external compose)                                     ║
+# ║     Deploy on actual separate machines in Santiago and Eindhoven.            ║
+# ║     Use docker-compose.distributed.yml (template provided below).           ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+
+# ── Shared configuration ────────────────────────────────────────────────────
+x-common: &common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  volumes:
+    - ./results:/results          # Persist benchmark reports
+    - huggingface-cache:/root/.cache/huggingface  # Cache model downloads
+  shm_size: "16gb"
+  # WHY shm_size 16GB?
+  # PyTorch uses /dev/shm for IPC between DataLoader workers and for NCCL
+  # shared memory transport. The default Docker shm of 64MB causes NCCL to
+  # fall back to slower socket transport, defeating the purpose of our benchmark.
+  ulimits:
+    memlock:
+      soft: -1
+      hard: -1
+  cap_add:
+    - NET_ADMIN  # Required for `tc` (Traffic Control) latency injection
+  environment:
+    - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}  # Optional: for gated models
+
+services:
+  # ════════════════════════════════════════════════════════════════════════════
+  # MODE 1: SINGLE NODE — Full local simulation with 2 GPUs
+  # ════════════════════════════════════════════════════════════════════════════
+  #
+  # This is the PRIMARY use case. One container has access to both GPUs
+  # and simulates all conditions (NVLink disable, latency injection) internally.
+  #
+  # Architecture:
+  #   ┌──────────────────────────────────────────┐
+  #   │  Container: probe-local                   │
+  #   │  ┌──────┐  NVLink/PCIe  ┌──────┐        │
+  #   │  │ GPU 0│◄─────────────►│ GPU 1│        │
+  #   │  └──────┘               └──────┘        │
+  #   │        ↑ tc netem (simulated latency)    │
+  #   │        └──── loopback interface ─────┘   │
+  #   └──────────────────────────────────────────┘
+  #
+  probe-local:
+    <<: *common
+    container_name: vllm-probe-local
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all  # Expose all GPUs to the container
+              capabilities: [gpu]
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # MODE 2: MULTI-NODE SIMULATION — Two containers, one GPU each
+  # ════════════════════════════════════════════════════════════════════════════
+  #
+  # Simulates a 2-node cluster using Docker networking. Each container
+  # gets exactly 1 GPU. NCCL communicates over the Docker bridge network
+  # instead of NVLink/PCIe, introducing REAL network overhead.
+  #
+  # Architecture:
+  #   ┌──────────────────┐    Docker Network    ┌──────────────────┐
+  #   │  node-0           │◄──────────────────►│  node-1           │
+  #   │  GPU 0            │    (bridge/overlay)  │  GPU 1            │
+  #   │  NCCL Master      │                      │  NCCL Worker      │
+  #   └──────────────────┘                      └──────────────────┘
+  #
+  # WHY THIS MODE?
+  # It adds REAL Docker bridge latency (~0.1-0.5ms), which is closer to
+  # an actual InfiniBand or Ethernet cluster than the loopback simulation.
+  # Combine with `tc` on the bridge interface for amplified latency testing.
+  #
+  probe-node-0:
+    <<: *common
+    container_name: vllm-probe-node-0
+    profiles: ["cluster"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]  # First GPU only
+              capabilities: [gpu]
+    environment:
+      - NCCL_SOCKET_IFNAME=eth0
+      - MASTER_ADDR=probe-node-0
+      - MASTER_PORT=29500
+      - WORLD_SIZE=2
+      - RANK=0
+    networks:
+      - gpu-cluster
+
+  probe-node-1:
+    <<: *common
+    container_name: vllm-probe-node-1
+    profiles: ["cluster"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["1"]  # Second GPU only
+              capabilities: [gpu]
+    environment:
+      - NCCL_SOCKET_IFNAME=eth0
+      - MASTER_ADDR=probe-node-0
+      - MASTER_PORT=29500
+      - WORLD_SIZE=2
+      - RANK=1
+    depends_on:
+      - probe-node-0
+    networks:
+      - gpu-cluster
+
+# ── Networks ────────────────────────────────────────────────────────────────
+networks:
+  gpu-cluster:
+    driver: bridge
+    # NOTE: For cross-host deployment, replace with overlay network:
+    # driver: overlay
+    # attachable: true
+
+# ── Volumes ─────────────────────────────────────────────────────────────────
+volumes:
+  huggingface-cache:
+    # Persistent cache for downloaded models.
+    # A 7B model is ~14GB. Without this volume, every `docker compose up`
+    # would re-download the model, wasting bandwidth and time.
+    driver: local

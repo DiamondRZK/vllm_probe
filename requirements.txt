@@ -1,0 +1,20 @@
+# ═══════════════════════════════════════════════════════════════
+# vllm_probe dependencies
+# ═══════════════════════════════════════════════════════════════
+#
+# vLLM pins its own PyTorch + CUDA versions. Installing vllm
+# will pull the correct torch version automatically.
+#
+# IMPORTANT: vLLM requires CUDA 12.1+ at runtime.
+# The Dockerfile uses nvidia/cuda:12.4.1-devel as the base.
+#
+
+# Core inference engine
+# vLLM includes: torch, transformers, flash-attn, xformers
+vllm>=0.6.0
+
+# Standard library (included for documentation; these ship with Python 3.10+)
+# argparse  — CLI argument parsing
+# subprocess — Linux command execution (tc, nvidia-smi)
+# json       — Report serialization
+# time       — High-resolution timing (perf_counter)

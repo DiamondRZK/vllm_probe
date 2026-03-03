@@ -1,0 +1,59 @@
+{
+  "vllm_probe_version": "1.0.0",
+  "configuration": {
+    "model": "Qwen/Qwen2.5-3B",
+    "scenario": {
+      "name": "creative",
+      "description": "Long-form Generation — Decode Stress Test",
+      "bottleneck": "Memory Bandwidth + Interconnect Latency",
+      "justification": "This is the 'canary in the coal mine' for distributed inference. With 2048 autoregressive decode steps, the total latency added by network round-trips is: 2048 × RTT. For cross-continent (200ms RTT), that's 2048 × 0.2s = 409.6 seconds of PURE NETWORK WAITING. This mathematically proves why Tensor Parallelism across continents is architecturally impossible for real-time inference.",
+      "sensitivity": {
+        "network": "CRITICAL — Each of 2048 tokens requires GPU sync (AllReduce)",
+        "nvlink": "CRITICAL — PCIe adds ~50μs/token × 2048 = ~100ms total overhead",
+        "vram": "LOW — Small input means minimal KV-cache"
+      }
+    },
+    "physics": {
+      "nvlink_flag": "enable",
+      "nvlink_hardware_present": false,
+      "actual_interconnect": "PCIe",
+      "network_profile": "cross-continent",
+      "network_description": "Intercontinental (e.g., Santiago ↔ Eindhoven, ~12000km)",
+      "network_real_world": "~180-220ms RTT via submarine cable + terrestrial hops",
+      "injected_delay_ms": 100
+    },
+    "tensor_parallel_size": 2,
+    "warmup_rounds": 2,
+    "benchmark_rounds": 3
+  },
+  "results": {
+    "timing": {
+      "ttft": {
+        "mean_s": 26.3435,
+        "p50_s": 26.3308,
+        "p99_s": 26.3814,
+        "unit": "seconds",
+        "description": "Time To First Token — measures prefill + scheduling latency"
+      },
+      "tpot": {
+        "mean_s": 0.115824,
+        "p50_s": 0.115768,
+        "p99_s": 0.115991,
+        "unit": "seconds",
+        "description": "Time Per Output Token — steady-state decode speed"
+      },
+      "throughput": {
+        "tokens_per_second": 7.77,
+        "description": "Aggregate output tokens per second"
+      },
+      "total_wall_clock_s": 263.4351
+    },
+    "analysis": {
+      "estimated_network_overhead_s": 409.6,
+      "network_overhead_pct": 155.5,
+      "decode_bottleneck": "NETWORK-DOMINATED (155% estimated network wait). Tensor Parallelism across this distance is NOT viable for real-time inference. Consider Pipeline Parallelism or data replication instead."
+    },
+    "errors": []
+  },
+  "timestamp": "2026-02-26T20:31:39.487095+00:00"
+}
