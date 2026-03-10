@@ -704,10 +704,15 @@ def run_single_request(
     t_start = time.perf_counter()
 
     # Send raw token IDs — not text — for exact input length control
+    #outputs = llm.generate(
+    #    prompts=None,
+    #    sampling_params=sampling_params,
+    #    prompt_token_ids=[prompt_token_ids],
+    #)
+
     outputs = llm.generate(
-        prompts=None,
-        sampling_params=sampling_params,
-        prompt_token_ids=[prompt_token_ids],
+        [{"prompt_token_ids": prompt_token_ids}],
+        sampling_params,
     )
 
     t_end = time.perf_counter()
@@ -766,11 +771,16 @@ def run_concurrent_requests(
     batch_token_ids = [prompt_token_ids] * concurrency
 
     t_start = time.perf_counter()
+    #outputs = llm.generate(
+    #    prompts=None,
+    #    sampling_params=sampling_params,
+    #    prompt_token_ids=batch_token_ids,
+    #)
     outputs = llm.generate(
-        prompts=None,
-        sampling_params=sampling_params,
-        prompt_token_ids=batch_token_ids,
+        [{"prompt_token_ids": ids} for ids in batch_token_ids],
+        sampling_params,
     )
+
     t_end = time.perf_counter()
 
     total_time = t_end - t_start
