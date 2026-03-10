@@ -79,7 +79,7 @@ from typing import Optional
 # CONSTANTS & CONFIGURATION
 # ─────────────────────────────────────────────────────────────────────────────
 
-VERSION = "1.1.0"
+VERSION = "1.0.0"
 
 # Network latency profiles (one-way delay in ms)
 # These are based on real-world measurements of submarine fiber optic cables
@@ -116,12 +116,6 @@ LATENCY_PROFILES = {
         "jitter_ms": 30,
         "description": "Worst case (e.g., Chile ↔ Southeast Asia via Pacific)",
         "real_world": "~400-500ms RTT with congestion",
-    },
-    "custom": {
-        "delay_ms": None,    # Set via --delay-ms
-        "jitter_ms": None,   # Set via --jitter-ms
-        "description": "User-defined latency profile",
-        "real_world": "User-specified",
     },
 }
 
@@ -183,23 +177,6 @@ WORKLOAD_SCENARIOS = {
             "causes request queuing and tail-latency spikes."
         ),
     },
-    "custom": {
-        "input_tokens": None,   # Set via --input-tokens
-        "output_tokens": None,  # Set via --output-tokens
-        "concurrency": None,    # Set via --concurrent
-        "description": "User-defined scenario with custom parameters",
-        "bottleneck": "User-defined",
-        "sensitivity": {
-            "network": "Depends on output token count",
-            "nvlink": "Depends on TP configuration",
-            "vram": "Depends on input length and concurrency",
-        },
-        "justification": (
-            "Custom scenario allowing user-specified input tokens, output tokens, "
-            "and concurrency. Use when the pre-built scenarios do not match your "
-            "production workload."
-        ),
-    },
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -233,9 +210,6 @@ class BenchmarkResult:
     network_overhead_estimate: float = 0.0  # Estimated seconds lost to network
     timestamp: str = ""
     errors: list[str] = field(default_factory=list)
-    # Per-round granularity (v1.1.0)
-    warmup_round_data: list[dict] = field(default_factory=list)
-    benchmark_round_data: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -255,10 +229,6 @@ class ProbeConfig:
     benchmark_rounds: int
     dry_run: bool
     verbose: bool
-    gpu_mem: float = 0.70
-    random_input: bool = False
-    seed: int = 42
-    prompt_file: Optional[str] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -603,84 +573,35 @@ def physics_context(simulator: PhysicsSimulator, config: ProbeConfig):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def generate_prompt_token_ids(
-    num_tokens: int,
-    llm,
-    config: ProbeConfig,
-    logger: logging.Logger,
-) -> list[int]:
+def generate_dummy_prompt(num_tokens: int) -> str:
     """
-    Generate prompt token IDs using one of three modes:
+    Generate a prompt that approximates the target token count.
 
-    1. prompt_file: Tokenize a real .txt file. Most realistic.
-    2. random_input: Truly random token IDs. No prefix caching shortcuts.
-    3. default: Repeated sentence tokenized and truncated. Deterministic.
-
-    Returns a list of integer token IDs of exactly `num_tokens` length.
+    WHY NOT EXACT TOKENS?
+    ─────────────────────
+    Tokenization is model-specific (BPE, SentencePiece, etc.). A word may
+    be 1-4 tokens depending on the tokenizer. We use a simple heuristic
+    (1 word ≈ 1.3 tokens for English) and rely on vLLM's `max_tokens`
+    parameter to enforce exact output length.
     """
-    import random
-
-    tokenizer = llm.get_tokenizer()
-
-    if config.prompt_file:
-        # ── Mode 1: Real document ────────────────────────────────────────
-        prompt_path = Path(config.prompt_file)
-        if not prompt_path.exists():
-            raise FileNotFoundError(f"Prompt file not found: {config.prompt_file}")
-
-        text = prompt_path.read_text(encoding="utf-8")
-        token_ids = tokenizer.encode(text)
-
-        if num_tokens and len(token_ids) > num_tokens:
-            token_ids = token_ids[:num_tokens]
-            logger.info(
-                f"Prompt file tokenized: {len(token_ids)} tokens "
-                f"(truncated from {len(tokenizer.encode(text))} to {num_tokens})"
-            )
-        elif num_tokens and len(token_ids) < num_tokens:
-            logger.warning(
-                f"Prompt file has only {len(token_ids)} tokens but "
-                f"{num_tokens} requested. Using file length as-is."
-            )
-        else:
-            logger.info(f"Prompt file tokenized: {len(token_ids)} tokens")
-
-        return token_ids
-
-    elif config.random_input:
-        # ── Mode 2: Random token IDs ─────────────────────────────────────
-        random.seed(config.seed)
-        vocab_size = tokenizer.vocab_size
-        # Skip IDs 0-99 and last 100 to avoid special tokens (BOS, EOS, PAD)
-        low = min(100, vocab_size - 1)
-        high = max(low + 1, vocab_size - 100)
-        token_ids = [random.randint(low, high) for _ in range(num_tokens)]
-        logger.info(
-            f"Generated {len(token_ids)} RANDOM token IDs "
-            f"(seed={config.seed}, vocab_size={vocab_size})"
-        )
-        return token_ids
-
-    else:
-        # ── Mode 3: Repeated sentence (default) ─────────────────────────
-        base_sentence = (
-            "The distributed inference system processes each request through "
-            "multiple GPU nodes coordinated via high-speed interconnect fabric "
-        )
-        base_ids = tokenizer.encode(base_sentence)
-        repetitions = (num_tokens // len(base_ids)) + 1
-        token_ids = (base_ids * repetitions)[:num_tokens]
-        logger.info(
-            f"Generated {len(token_ids)} REPEATED token IDs "
-            f"(base_len={len(base_ids)}, repeated {repetitions}x)"
-        )
-        return token_ids
+    # Average English word ≈ 1.3 tokens in most tokenizers
+    num_words = int(num_tokens / 1.3)
+    # Use a repetitive but valid prompt to ensure consistent tokenization
+    base_sentence = (
+        "The distributed inference system processes each request through "
+        "multiple GPU nodes coordinated via high-speed interconnect fabric "
+    )
+    words = base_sentence.split()
+    prompt_words = []
+    while len(prompt_words) < num_words:
+        prompt_words.extend(words)
+    return " ".join(prompt_words[:num_words])
 
 
 def run_single_request(
     llm,
     sampling_params,
-    prompt_token_ids: list[int],
+    prompt: str,
     logger: logging.Logger,
 ) -> dict:
     """
@@ -691,24 +612,23 @@ def run_single_request(
     • TTFT (Time To First Token):
       Wall-clock time from request submission to receiving the first
       generated token. This measures prefill latency + scheduling overhead.
+      Critical for user-perceived responsiveness.
 
     • TPOT (Time Per Output Token):
       Average time between consecutive tokens during the decode phase.
       Calculated as: (total_time - TTFT) / (num_output_tokens - 1).
+      This is the steady-state generation speed.
 
     • Throughput:
       Total tokens generated per second: num_output_tokens / total_time.
+      For batched scenarios, this is the AGGREGATE across all sequences.
     """
     from vllm import SamplingParams as _  # type check only
 
     t_start = time.perf_counter()
 
-    # Send raw token IDs — not text — for exact input length control
-    outputs = llm.generate(
-        prompts=None,
-        sampling_params=sampling_params,
-        prompt_token_ids=[prompt_token_ids],
-    )
+    # vLLM's generate() returns RequestOutput objects
+    outputs = llm.generate([prompt], sampling_params)
 
     t_end = time.perf_counter()
     total_time = t_end - t_start
@@ -756,21 +676,29 @@ def run_single_request(
 def run_concurrent_requests(
     llm,
     sampling_params,
-    prompt_token_ids: list[int],
+    prompt: str,
     concurrency: int,
     logger: logging.Logger,
 ) -> list[dict]:
     """
     Submit multiple prompts as a batch to stress the scheduler.
+
+    WHY BATCHING MATTERS:
+    ─────────────────────
+    vLLM uses continuous batching with PagedAttention. Unlike naive batching
+    (process all sequences in lockstep), PagedAttention allows:
+      - Dynamic memory allocation (no pre-reserved max_seq_len per request)
+      - Preemption of lower-priority sequences
+      - Efficient KV-cache sharing for common prefixes
+
+    By submitting `concurrency` prompts simultaneously, we test whether
+    the scheduler can maintain acceptable per-request latency under load,
+    or if VRAM pressure causes request queuing.
     """
-    batch_token_ids = [prompt_token_ids] * concurrency
+    prompts = [prompt] * concurrency
 
     t_start = time.perf_counter()
-    outputs = llm.generate(
-        prompts=None,
-        sampling_params=sampling_params,
-        prompt_token_ids=batch_token_ids,
-    )
+    outputs = llm.generate(prompts, sampling_params)
     t_end = time.perf_counter()
 
     total_time = t_end - t_start
@@ -878,10 +806,9 @@ def run_benchmark(config: ProbeConfig, logger: logging.Logger) -> BenchmarkResul
         llm = LLM(
             model=config.model,
             tensor_parallel_size=config.tensor_parallel,
-            gpu_memory_utilization=config.gpu_mem,
+            gpu_memory_utilization=0.70,  # Conservative — leaves room for other processes
             max_model_len=target_model_len,
             enforce_eager=True,  # Disable CUDA graphs — more compatible, slightly slower
-            enable_prefix_caching=False,  # No KV-cache reuse between rounds for honest TTFT
         )
     except Exception as e:
         logger.error(f"Failed to initialize vLLM: {e}")
@@ -890,34 +817,20 @@ def run_benchmark(config: ProbeConfig, logger: logging.Logger) -> BenchmarkResul
 
     sampling_params = SamplingParams(
         max_tokens=scenario["output_tokens"],
-        ignore_eos=True,    # Force exact output token count — never stop early at EOS
-        temperature=0.0,    # Deterministic for reproducibility
-        top_p=1.0,          # No nucleus sampling — use full distribution
+        temperature=0.0,  # Deterministic for reproducibility
+        top_p=1.0,
     )
 
-    prompt_token_ids = generate_prompt_token_ids(
-        scenario["input_tokens"], llm, config, logger,
-    )
+    prompt = generate_dummy_prompt(scenario["input_tokens"])
 
     # ── Warmup ───────────────────────────────────────────────────────────
     logger.info(f"Running {config.warmup_rounds} warmup round(s)...")
-    warmup_data = []
     for i in range(config.warmup_rounds):
         logger.debug(f"  Warmup {i+1}/{config.warmup_rounds}")
         if scenario["concurrency"] > 1:
-            wm = run_concurrent_requests(llm, sampling_params, prompt_token_ids, scenario["concurrency"], logger)
+            run_concurrent_requests(llm, sampling_params, prompt, scenario["concurrency"], logger)
         else:
-            wm = [run_single_request(llm, sampling_params, prompt_token_ids, logger)]
-        # Record warmup data for transparency
-        for m in wm:
-            warmup_data.append({
-                "round": i + 1,
-                "ttft_s": round(m.get("ttft", 0), 4),
-                "tpot_s": round(m.get("tpot", 0), 6),
-                "total_time_s": round(m.get("total_time", 0), 4),
-                "output_tokens_generated": m.get("num_tokens", 0),
-                "note": "DISCARDED — " + ("CUDA JIT + clock ramp + NCCL init" if i == 0 else "hardware stabilization"),
-            })
+            run_single_request(llm, sampling_params, prompt, logger)
 
     # ── Benchmark ────────────────────────────────────────────────────────
     logger.info(f"Running {config.benchmark_rounds} benchmark round(s)...")
@@ -925,17 +838,16 @@ def run_benchmark(config: ProbeConfig, logger: logging.Logger) -> BenchmarkResul
     all_tpot = []
     all_throughput = []
     all_total = []
-    round_data = []
 
     for i in range(config.benchmark_rounds):
         logger.info(f"  Round {i+1}/{config.benchmark_rounds}")
 
         if scenario["concurrency"] > 1:
             measurements = run_concurrent_requests(
-                llm, sampling_params, prompt_token_ids, scenario["concurrency"], logger,
+                llm, sampling_params, prompt, scenario["concurrency"], logger,
             )
         else:
-            measurements = [run_single_request(llm, sampling_params, prompt_token_ids, logger)]
+            measurements = [run_single_request(llm, sampling_params, prompt, logger)]
 
         for m in measurements:
             if m.get("error"):
@@ -947,14 +859,6 @@ def run_benchmark(config: ProbeConfig, logger: logging.Logger) -> BenchmarkResul
                 all_ttft.append(m["ttft"])
             if "tpot" in m:
                 all_tpot.append(m["tpot"])
-            round_data.append({
-                "round": i + 1,
-                "ttft_s": round(m.get("ttft", 0), 4),
-                "tpot_s": round(m.get("tpot", 0), 6),
-                "throughput_tok_s": round(m.get("throughput", 0), 2),
-                "total_time_s": round(m.get("total_time", 0), 4),
-                "output_tokens_generated": m.get("num_tokens", 0),
-            })
 
     # ── Compute Statistics ───────────────────────────────────────────────
     if all_ttft:
@@ -981,10 +885,6 @@ def run_benchmark(config: ProbeConfig, logger: logging.Logger) -> BenchmarkResul
         )
     else:
         result.network_overhead_estimate = 0.0
-
-    # Store per-round data for JSON report transparency
-    result.warmup_round_data = warmup_data
-    result.benchmark_round_data = round_data
 
     return result
 
@@ -1023,18 +923,11 @@ def generate_report(result: BenchmarkResult, config: ProbeConfig, logger: loggin
                 "injected_delay_ms": profile["delay_ms"],
             },
             "tensor_parallel_size": config.tensor_parallel,
-            "gpu_memory_utilization": config.gpu_mem,
-            "gpu_ids": config.gpu_ids,
-            "random_input": config.random_input,
-            "seed": config.seed if config.random_input else None,
-            "prompt_file": config.prompt_file,
             "warmup_rounds": config.warmup_rounds,
             "benchmark_rounds": config.benchmark_rounds,
         },
         "results": {
-            "warmup_rounds": result.warmup_round_data,
-            "rounds": result.benchmark_round_data,
-            "aggregate": {
+            "timing": {
                 "ttft": {
                     "mean_s": round(result.ttft_mean, 4),
                     "p50_s": round(result.ttft_p50, 4),
@@ -1062,7 +955,6 @@ def generate_report(result: BenchmarkResult, config: ProbeConfig, logger: loggin
                     if result.total_time > 0 else 0
                 ),
                 "decode_bottleneck": _analyze_bottleneck(result, config),
-                "round_variance_pct": _compute_variance(result),
             },
             "errors": result.errors,
         },
@@ -1099,21 +991,6 @@ def _analyze_bottleneck(result: BenchmarkResult, config: ProbeConfig) -> str:
         )
 
     return "COMPUTE/MEMORY-BOUND. GPU hardware is the primary bottleneck (healthy state)."
-
-
-def _compute_variance(result: BenchmarkResult) -> float:
-    """Compute coefficient of variation across benchmark rounds."""
-    if not result.benchmark_round_data or len(result.benchmark_round_data) < 2:
-        return 0.0
-    times = [r["total_time_s"] for r in result.benchmark_round_data if "total_time_s" in r]
-    if not times or len(times) < 2:
-        return 0.0
-    mean = sum(times) / len(times)
-    if mean == 0:
-        return 0.0
-    variance = sum((t - mean) ** 2 for t in times) / len(times)
-    std = variance ** 0.5
-    return round(std / mean * 100, 2)  # Coefficient of variation as percentage
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1235,14 +1112,10 @@ def build_parser() -> argparse.ArgumentParser:
             "  vllm_probe --scenario analyst\n\n"
             "  # Simulate cross-continent latency (Santiago ↔ Eindhoven)\n"
             "  vllm_probe --scenario creative --network cross-continent --tp 2\n\n"
-            "  # Custom scenario with your own parameters\n"
-            "  vllm_probe --scenario custom --input-tokens 4096 --output-tokens 1024 --concurrent 4 --tp 2\n\n"
-            "  # Custom network delay with real document input\n"
-            "  vllm_probe --scenario custom --prompt-file doc.txt --output-tokens 512 --network custom --delay-ms 75\n\n"
-            "  # Random input for realistic prefill (no prefix caching)\n"
-            "  vllm_probe --scenario analyst --random-input --seed 42 --tp 1\n\n"
-            "  # Select specific GPUs and tune memory\n"
-            "  vllm_probe --scenario chatbot --tp 2 --gpu-ids 2,3 --gpu-mem 0.90\n\n"
+            "  # Disable NVLink to simulate PCIe-only cluster\n"
+            "  vllm_probe --scenario creative --nvlink disable --tp 2\n\n"
+            "  # Full stress test: no NVLink + intercontinental latency\n"
+            "  vllm_probe --scenario chatbot --nvlink disable --network cross-continent\n\n"
             "  # Dry run (show config without running inference)\n"
             "  vllm_probe --scenario analyst --dry-run\n\n"
             "  # Run ALL scenarios for a complete infrastructure report\n"
@@ -1261,8 +1134,7 @@ def build_parser() -> argparse.ArgumentParser:
             "'analyst' = prefill stress (8K in, 128 out). "
             "'creative' = decode stress (64 in, 2K out). "
             "'chatbot' = throughput stress (512/512, 32 concurrent). "
-            "'custom' = user-defined (requires --input-tokens, --output-tokens). "
-            "'all' = run analyst, creative, chatbot sequentially."
+            "'all' = run all three sequentially."
         ),
     )
 
@@ -1315,8 +1187,7 @@ def build_parser() -> argparse.ArgumentParser:
             "'datacenter' = 1ms (same building). "
             "'regional' = 15ms (same continent). "
             "'cross-continent' = 100ms (Chile↔Europe). "
-            "'worst-case' = 250ms (maximum realistic). "
-            "'custom' = user-defined (requires --delay-ms)."
+            "'worst-case' = 250ms (maximum realistic latency)."
         ),
     )
 
@@ -1336,71 +1207,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=5,
         help="Number of benchmark rounds (measured). Default: 5",
-    )
-
-    # ── Custom Scenario Parameters ───────────────────────────────────────
-    custom = parser.add_argument_group(
-        "Custom Scenario",
-        "Parameters for --scenario custom (ignored for built-in scenarios)",
-    )
-    custom.add_argument(
-        "--input-tokens",
-        type=int, default=None,
-        help="Input token count (required with --scenario custom)",
-    )
-    custom.add_argument(
-        "--output-tokens",
-        type=int, default=None,
-        help="Output token count (required with --scenario custom)",
-    )
-    custom.add_argument(
-        "--concurrent",
-        type=int, default=None,
-        help="Concurrent requests (default: 1, only with --scenario custom)",
-    )
-
-    # ── Custom Network Parameters ────────────────────────────────────────
-    custom_net = parser.add_argument_group(
-        "Custom Network",
-        "Parameters for --network custom (ignored for built-in profiles)",
-    )
-    custom_net.add_argument(
-        "--delay-ms",
-        type=float, default=None,
-        help="One-way delay in ms (required with --network custom)",
-    )
-    custom_net.add_argument(
-        "--jitter-ms",
-        type=float, default=None,
-        help="Jitter in ms (default: 0, only with --network custom)",
-    )
-
-    # ── Input Mode ───────────────────────────────────────────────────────
-    input_mode = parser.add_argument_group(
-        "Input Mode",
-        "Control how input prompts are generated",
-    )
-    input_mode.add_argument(
-        "--random-input",
-        action="store_true", default=False,
-        help="Use random token IDs instead of repeated sentence. More realistic prefill.",
-    )
-    input_mode.add_argument(
-        "--seed",
-        type=int, default=42,
-        help="Random seed for --random-input (default: 42)",
-    )
-    input_mode.add_argument(
-        "--prompt-file",
-        type=str, default=None,
-        help="Path to .txt file to use as prompt. Most realistic input mode.",
-    )
-
-    # ── GPU Configuration ────────────────────────────────────────────────
-    parser.add_argument(
-        "--gpu-mem",
-        type=float, default=0.70,
-        help="GPU memory utilization 0.0-1.0 (default: 0.70). Raise for chatbot, lower if OOM.",
     )
 
     # ── Output ───────────────────────────────────────────────────────────
@@ -1515,31 +1321,8 @@ def main():
     if args.scenario is None:
         parser.error("the following arguments are required: --scenario/-s")
 
-    # Validate custom scenario
-    if args.scenario == "custom":
-        if args.input_tokens is None or args.output_tokens is None:
-            parser.error("--scenario custom requires --input-tokens and --output-tokens")
-        WORKLOAD_SCENARIOS["custom"]["input_tokens"] = args.input_tokens
-        WORKLOAD_SCENARIOS["custom"]["output_tokens"] = args.output_tokens
-        WORKLOAD_SCENARIOS["custom"]["concurrency"] = args.concurrent if args.concurrent else 1
-        WORKLOAD_SCENARIOS["custom"]["description"] = (
-            f"Custom: {args.input_tokens}in/{args.output_tokens}out"
-            f"/{args.concurrent or 1}conc"
-        )
-
-    # Validate custom network
-    if args.network_profile == "custom":
-        if args.delay_ms is None:
-            parser.error("--network custom requires --delay-ms")
-        LATENCY_PROFILES["custom"]["delay_ms"] = args.delay_ms
-        LATENCY_PROFILES["custom"]["jitter_ms"] = args.jitter_ms if args.jitter_ms else 0.0
-        LATENCY_PROFILES["custom"]["description"] = (
-            f"Custom: {args.delay_ms}ms ± {args.jitter_ms or 0}ms"
-        )
-
     scenarios_to_run = (
-        [k for k in WORKLOAD_SCENARIOS.keys() if k != "custom"]
-        if args.scenario == "all"
+        list(WORKLOAD_SCENARIOS.keys()) if args.scenario == "all"
         else [args.scenario]
     )
 
@@ -1551,13 +1334,6 @@ def main():
     if args.gpu_ids != "all":
         os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu_ids
         logger.info(f"CUDA_VISIBLE_DEVICES set to: {args.gpu_ids}")
-        num_visible = len(args.gpu_ids.split(","))
-        if num_visible < args.tensor_parallel:
-            parser.error(
-                f"--gpu-ids provides {num_visible} GPU(s) but "
-                f"--tp {args.tensor_parallel} requires at least "
-                f"{args.tensor_parallel} GPU(s)"
-            )
 
     # ── Run benchmarks ───────────────────────────────────────────────────
     all_reports = []
@@ -1575,10 +1351,6 @@ def main():
             benchmark_rounds=args.rounds,
             dry_run=args.dry_run,
             verbose=args.verbose,
-            gpu_mem=args.gpu_mem,
-            random_input=args.random_input,
-            seed=args.seed,
-            prompt_file=args.prompt_file,
         )
 
         # Detect actual hardware NVLink for accurate display
