@@ -1515,18 +1515,22 @@ def main():
     if args.scenario is None:
         parser.error("the following arguments are required: --scenario/-s")
 
-    # Validate custom scenario
+# Validate custom scenario
     if args.scenario == "custom":
-        if args.input_tokens is None or args.output_tokens is None:
-            parser.error("--scenario custom requires --input-tokens and --output-tokens")
-        WORKLOAD_SCENARIOS["custom"]["input_tokens"] = args.input_tokens
+        if args.output_tokens is None:
+            parser.error("--scenario custom requires --output-tokens")
+        if args.input_tokens is None and args.prompt_file is None:
+            parser.error("--scenario custom requires --input-tokens or --prompt-file")
+        # If prompt-file is used without --input-tokens, set a placeholder
+        # (actual length determined at tokenization time)
+        input_tok = args.input_tokens if args.input_tokens else 0
+        WORKLOAD_SCENARIOS["custom"]["input_tokens"] = input_tok
         WORKLOAD_SCENARIOS["custom"]["output_tokens"] = args.output_tokens
         WORKLOAD_SCENARIOS["custom"]["concurrency"] = args.concurrent if args.concurrent else 1
         WORKLOAD_SCENARIOS["custom"]["description"] = (
-            f"Custom: {args.input_tokens}in/{args.output_tokens}out"
+            f"Custom: {input_tok or 'from-file'}in/{args.output_tokens}out"
             f"/{args.concurrent or 1}conc"
         )
-
     # Validate custom network
     if args.network_profile == "custom":
         if args.delay_ms is None:
