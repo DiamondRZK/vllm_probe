@@ -870,7 +870,21 @@ def run_benchmark(config: ProbeConfig, logger: logging.Logger) -> BenchmarkResul
     try:
         # Determine the required context length for this scenario
         # analyst = 8192+128 = 8320, creative = 64+2048 = 2112, chatbot = 512+512 = 1024
-        required_len = scenario["input_tokens"] + scenario["output_tokens"]
+        #required_len = scenario["input_tokens"] + scenario["output_tokens"]
+
+        # FIX for if using prompt-file with input_tokens=0 (placeholder),
+        # we don't know the actual length yet. Use a generous default.
+        input_len = scenario["input_tokens"]
+        if input_len == 0 and config.prompt_file:
+            # Pre-tokenize to discover actual length
+            from transformers import AutoTokenizer
+            _tok = AutoTokenizer.from_pretrained(config.model)
+            _text = Path(config.prompt_file).read_text(encoding="utf-8")
+            input_len = len(_tok.encode(_text))
+            logger.info(f"Prompt file pre-scan: {input_len} tokens detected")
+            del _tok, _text
+
+        required_len = input_len + scenario["output_tokens"]
 
         # Cap max_model_len to what we actually need (with 2× headroom).
         # WHY: A model like Qwen2.5-3B supports 32K context, but allocating
